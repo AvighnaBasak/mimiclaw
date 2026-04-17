@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MimiClaw Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header>
+  <h1>&#129422; <span>Mimi</span>Claw</h1>
+  <div style="display:flex;align-items:center;gap:1rem;">
+    <span id="last-updated" class="muted-text"></span>
+    <button id="refresh-btn" class="btn-orange-sm" onclick="loadAll()">&#8635; Refresh</button>
+    <span id="clock"></span>
+  </div>
+</header>
+
+<main>
+
+  <!-- STATS ROW -->
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label">Total Assignments</div>
+      <div class="stat-value" id="stat-total">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Completed</div>
+      <div class="stat-value" id="stat-completed">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Pending</div>
+      <div class="stat-value" id="stat-pending">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Overdue</div>
+      <div class="stat-value" id="stat-overdue">—</div>
+    </div>
+  </div>
+
+  <!-- UPCOMING + REMINDERS -->
+  <div class="grid-2">
+
+    <div class="card">
+      <div class="card-header"><span>&#128218;</span><h2>Upcoming Assignments</h2></div>
+      <div class="card-body" id="upcoming-list">
+        <div class="empty-state">Loading...</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span>&#128276;</span><h2>Reminders</h2></div>
+      <div class="card-body" id="reminders-list">
+        <div class="empty-state">Loading...</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- COMPLETED WITH DRIVE LINKS -->
+  <div class="grid-wide card">
+    <div class="card-header"><span>&#9989;</span><h2>Recently Completed</h2></div>
+    <div class="card-body" style="padding:0;">
+      <table id="completed-table">
+        <thead>
+          <tr>
+            <th>Assignment</th>
+            <th>Course</th>
+            <th>Due Date</th>
+            <th>Files</th>
+          </tr>
+        </thead>
+        <tbody id="completed-body">
+          <tr><td colspan="4" class="empty-state">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ALL ASSIGNMENTS TABLE -->
+  <div class="grid-wide card">
+    <div class="card-header">
+      <span>&#128196;</span>
+      <h2>All Assignments</h2>
+      <div style="margin-left:auto;display:flex;gap:0.5rem;">
+        <button class="filter-btn active" data-filter="all">All</button>
+        <button class="filter-btn" data-filter="pending">Pending</button>
+        <button class="filter-btn" data-filter="completed">Completed</button>
+        <button class="filter-btn" data-filter="skipped">Skipped</button>
+      </div>
+    </div>
+    <div class="card-body" style="padding:0;">
+      <table id="all-table">
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>Course</th>
+            <th>Due Date</th>
+            <th>Status</th>
+            <th>Drive</th>
+          </tr>
+        </thead>
+        <tbody id="all-body">
+          <tr><td colspan="5" class="empty-state">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+</main>
+
+<script src="renderer.js"></script>
+</body>
+</html>

@@ -1,28 +1,34 @@
-"""Launch the local Flask dashboard and open it in the browser."""
+"""Launch the MimiClaw Electron desktop dashboard."""
 import os
+import subprocess
 import sys
-import threading
-import time
-import webbrowser
 
-HOST = "127.0.0.1"
-PORT = 5050
-URL = f"http://{HOST}:{PORT}"
+DASHBOARD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard")
 
 
-def open_browser():
-    time.sleep(1.5)
-    webbrowser.open(URL)
+def check_node():
+    try:
+        subprocess.run(["node", "--version"], capture_output=True, check=True)
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+
+
+def ensure_node_modules():
+    modules_path = os.path.join(DASHBOARD_DIR, "node_modules", "electron")
+    if not os.path.exists(modules_path):
+        print("Installing Electron (first run only)...")
+        subprocess.run(["npm", "install"], cwd=DASHBOARD_DIR, check=True, shell=True)
+        print("Done.")
 
 
 if __name__ == "__main__":
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "dashboard"))
-    from db import init_db
-    init_db()
+    if not check_node():
+        print("ERROR: Node.js is not installed or not in PATH.")
+        print("Download from https://nodejs.org")
+        sys.exit(1)
 
-    threading.Thread(target=open_browser, daemon=True).start()
-    print(f"🦞 MimiClaw Dashboard starting at {URL}")
+    ensure_node_modules()
 
-    from dashboard.app import create_app
-    flask_app = create_app()
-    flask_app.run(host=HOST, port=PORT, debug=False, use_reloader=False)
+    print("Launching MimiClaw Dashboard...")
+    subprocess.run(["npm", "start"], cwd=DASHBOARD_DIR, shell=True)

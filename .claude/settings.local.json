@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(node --check dashboard/main.js)",
+      "Bash(node --check dashboard/preload.js)",
+      "Bash(node --check dashboard/renderer.js)"
+    ]
+  }
+}
