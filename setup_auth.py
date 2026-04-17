@@ -2,6 +2,8 @@
 import os
 import sys
 
+os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
+
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -34,16 +36,14 @@ def auth_service(scopes: list[str], token_file: str, name: str):
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            print(f"✅ {name} token refreshed.")
         else:
             flow = InstalledAppFlow.from_client_secrets_file(CREDS_FILE, scopes)
             creds = flow.run_local_server(port=0)
-            print(f"✅ {name} authenticated successfully.")
         with open(token_file, "w") as f:
             f.write(creds.to_json())
-        print(f"✅ Token saved to: {token_file}")
+        print(f"[OK] {name} token saved to: {token_file}")
     else:
-        print(f"✅ {name} token already valid.")
+        print(f"[OK] {name} token already valid.")
 
 
 def main():
@@ -64,11 +64,7 @@ def main():
     auth_service(DRIVE_SCOPES, DRIVE_TOKEN, "Google Drive")
 
     print("\n" + "=" * 50)
-    print("✅ Both tokens saved.")
-    print("If deploying to Fly.io, upload the credentials/ folder to your server:")
-    print("  fly sftp shell")
-    print("  put credentials/token_classroom.json /app/credentials/token_classroom.json")
-    print("  put credentials/token_drive.json     /app/credentials/token_drive.json")
+    print("[OK] Both tokens saved. You can now run bot.py and the dashboard.")
     print("=" * 50)
 
 
