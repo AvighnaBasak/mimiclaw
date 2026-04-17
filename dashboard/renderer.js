@@ -62,7 +62,7 @@ async function loadPending() {
   const items = await window.api.getPending()
   const el = document.getElementById('upcoming-list')
   if (!items.length) {
-    el.innerHTML = '<div class="empty-state">No pending assignments. &#127881;</div>'
+    el.innerHTML = '<div class="empty-state">No pending assignments.</div>'
     return
   }
   const sorted = [...items].sort((a, b) => {

@@ -28,18 +28,19 @@ function createWindow() {
     height: 900,
     minWidth: 900,
     minHeight: 600,
+    frame: false,
+    titleBarStyle: 'hidden',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
     title: 'MimiClaw Dashboard',
-    backgroundColor: '#F5F5F0',
+    backgroundColor: '#FAF8F6',
   })
 
   win.loadFile(path.join(__dirname, 'index.html'))
 
-  // Open external links in browser, not Electron
   win.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
@@ -61,3 +62,10 @@ ipcMain.handle('get-reminders', () => queryDb('reminders'))
 ipcMain.handle('open-url', (_event, url) => {
   if (url && url.startsWith('https://')) shell.openExternal(url)
 })
+
+ipcMain.handle('win-minimize', () => { BrowserWindow.getFocusedWindow()?.minimize() })
+ipcMain.handle('win-maximize', () => {
+  const w = BrowserWindow.getFocusedWindow()
+  if (w) w.isMaximized() ? w.unmaximize() : w.maximize()
+})
+ipcMain.handle('win-close', () => { BrowserWindow.getFocusedWindow()?.close() })
