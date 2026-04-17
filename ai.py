@@ -8,7 +8,8 @@ load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODELS = [
-    "google/gemma-2-27b-it:free",
+    "google/gemma-4-31b-it:free",
+    "qwen/qwen3-coder:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "deepseek/deepseek-r1-0528:free",
 ]

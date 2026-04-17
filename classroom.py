@@ -66,6 +66,11 @@ class ClassroomClient:
                     due = date(d["year"], d["month"], d["day"])
                 except Exception:
                     pass
+
+            submission_state = self._get_submission_state(
+                course_id, item["id"]
+            )
+
             attachments = []
             for mat in item.get("materials", []):
                 if "driveFile" in mat:
@@ -97,9 +102,27 @@ class ClassroomClient:
                 "title": item.get("title", "Untitled"),
                 "description": item.get("description", ""),
                 "due_date": due,
+                "submission_state": submission_state,
                 "attachments": attachments,
             })
         return assignments
+
+    def _get_submission_state(self, course_id: str, coursework_id: str) -> str:
+        svc = self._get_service()
+        try:
+            result = (
+                svc.courses()
+                .courseWork()
+                .studentSubmissions()
+                .list(courseId=course_id, courseWorkId=coursework_id, userId="me")
+                .execute()
+            )
+            subs = result.get("studentSubmissions", [])
+            if subs:
+                return subs[0].get("state", "CREATED")
+        except Exception:
+            pass
+        return "CREATED"
 
     def get_all_new_assignments(self, session) -> list[dict]:
         from db import assignment_id_exists
@@ -110,6 +133,8 @@ class ClassroomClient:
             try:
                 assignments = self.get_assignments(course["id"], course["name"])
                 for a in assignments:
+                    if a["submission_state"] in ("TURNED_IN", "RETURNED"):
+                        continue
                     if not assignment_id_exists(session, a["id"]):
                         new_assignments.append(a)
             except Exception:

@@ -1,6 +1,7 @@
 # Secrets & credentials
 .env
 credentials/*.json
+.claude/
 
 # Claude notes
 CLAUDE.md
