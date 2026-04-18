@@ -1,0 +1,26 @@
+# Secrets & credentials
+.env
+credentials/*.json
+.claude/
+
+# Claude notes
+CLAUDE.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+
+# Data / DB
+data/
+
+# Electron / Node
+dashboard/node_modules/
+node_modules/
+
+# Logs
+*.log
