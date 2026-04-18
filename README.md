@@ -16,7 +16,7 @@
 MimiClaw monitors your Google Classroom, automatically completes assignments using AI, uploads finished work to Google Drive, and sends everything back to you on Telegram. It comes with an Electron desktop dashboard for tracking all your assignments at a glance.
 
 <p align="center">
-  <img src="https://ibb.co/R4pnYtq9" />
+  <img src="https://i.ibb.co/FqbvmcFK/product-dashboard.png" alt="MimiClaw Dashboard" />
 </p>
 
 ---
