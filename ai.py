@@ -5,20 +5,35 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-API_URL = "https://openrouter.ai/api/v1/chat/completions"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
 MODELS = [
-    "google/gemma-4-31b-it:free",
-    "qwen/qwen3-coder:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "deepseek/deepseek-r1-0528:free",
+    {
+        "name": "gemma-4-31b-it",
+        "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "api_key": GEMINI_API_KEY,
+    },
+    {
+        "name": "openai/gpt-oss-120b",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "api_key": GROQ_API_KEY,
+    },
+    {
+        "name": "qwen/qwen3-32b",
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "api_key": GROQ_API_KEY,
+    },
 ]
-HEADERS = {
-    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-    "Content-Type": "application/json",
-    "HTTP-Referer": "https://mimiclaw.local",
-    "X-Title": "MimiClaw",
-}
+
+
+import re
+
+
+def _strip_thinking(text: str) -> str:
+    text = re.sub(r'<thought>.*?</thought>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    return text.strip()
 
 
 class AIClient:
@@ -26,17 +41,22 @@ class AIClient:
         for model in MODELS:
             try:
                 payload = {
-                    "model": model,
+                    "model": model["name"],
                     "messages": messages,
                     "max_tokens": max_tokens,
                 }
-                headers = {**HEADERS, "Authorization": f"Bearer {OPENROUTER_API_KEY}"}
-                resp = requests.post(API_URL, headers=headers, json=payload, timeout=120)
+                headers = {
+                    "Authorization": f"Bearer {model['api_key']}",
+                    "Content-Type": "application/json",
+                }
+                resp = requests.post(
+                    model["url"], headers=headers, json=payload, timeout=180
+                )
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
                 if content and content.strip():
-                    return content.strip()
+                    return _strip_thinking(content)
             except Exception:
                 continue
         raise RuntimeError("All AI models failed to respond.")
@@ -57,55 +77,59 @@ class AIClient:
         messages.append({"role": "user", "content": user_message})
         return self._call(messages, max_tokens=1024)
 
-    def complete_assignment(self, assignment: dict, pdf_text: str | None = None) -> str:
+    def complete_assignment(self, assignment: dict, pdf_text: str | None = None) -> list[dict]:
         context_parts = [
             f"Course: {assignment.get('course_name', 'Unknown')}",
             f"Assignment Title: {assignment.get('title', 'Untitled')}",
             f"Assignment Description:\n{assignment.get('description', 'No description provided.')}",
         ]
         if pdf_text:
-            context_parts.append(f"\nAttached PDF Content:\n{pdf_text}")
+            context_parts.append(f"\nAttached PDF/Document Content:\n{pdf_text}")
 
         prompt = "\n\n".join(context_parts)
+
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "You are an expert academic assistant. Your task is to write a complete, "
-                    "well-structured, submittable academic response to the assignment provided. "
-                    "Write as if you are the student. Be thorough, accurate, and appropriately formal. "
-                    "Do not include meta-commentary about the assignment — only produce the actual work."
+                    "You are an expert academic assistant that produces assignment deliverables.\n\n"
+                    "RULES:\n"
+                    "1. Read the assignment carefully and determine what files are required.\n"
+                    "2. Use the CORRECT file extension based on what the assignment asks for "
+                    "(.c, .py, .java, .cpp, .h, .txt, .md, etc.).\n"
+                    "3. If the assignment requires multiple files (e.g. client.c and server.c), "
+                    "create each as a SEPARATE file.\n"
+                    "4. For code assignments: output ONLY the source code. No introductions, "
+                    "no design overviews, no architecture explanations, no fluff. "
+                    "Just clean, compilable/runnable code with necessary comments.\n"
+                    "5. For written assignments: output ONLY the essay/report content.\n"
+                    "6. Return your response as ONLY valid JSON in this exact format:\n"
+                    '{"files": [{"filename": "exact_name.ext", "content": "full file content here"}]}\n'
+                    "7. No text before or after the JSON. No markdown code fences. Just the JSON object.\n"
+                    "8. Make sure the code is COMPLETE and not truncated. Every function must have "
+                    "a full implementation."
                 ),
             },
             {"role": "user", "content": prompt},
         ]
-        return self._call(messages, max_tokens=4096)
 
-    def split_into_files(self, assignment: dict, completed_text: str) -> list[dict]:
-        prompt = (
-            f"Assignment Title: {assignment.get('title', '')}\n"
-            f"Assignment Description: {assignment.get('description', '')}\n\n"
-            f"Completed Work:\n{completed_text}\n\n"
-            "Based on the assignment description and completed work above, determine if this should "
-            "be split into multiple separate files (e.g. 'report AND bibliography', 'Part A, B, C'). "
-            "Return ONLY valid JSON in this exact format with no extra text:\n"
-            '{"files": [{"filename": "report.txt", "content": "...full content here..."}]}\n'
-            "If only one deliverable, return a single-item list. Use .txt extension for all files."
-        )
-        messages = [
-            {
-                "role": "system",
-                "content": "You are a file splitter. Return only valid JSON, nothing else.",
-            },
-            {"role": "user", "content": prompt},
-        ]
+        raw = self._call(messages, max_tokens=16384)
+
+        # Strip markdown code fences if present
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            first_newline = cleaned.find("\n")
+            cleaned = cleaned[first_newline + 1:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+
         try:
-            raw = self._call(messages, max_tokens=8192)
-            start = raw.find("{")
-            end = raw.rfind("}") + 1
+            start = cleaned.find("{")
+            end = cleaned.rfind("}") + 1
             if start == -1 or end == 0:
                 raise ValueError("No JSON found")
-            parsed = json.loads(raw[start:end])
+            parsed = json.loads(cleaned[start:end])
             files = parsed.get("files", [])
             if not files:
                 raise ValueError("Empty files list")
@@ -115,4 +139,4 @@ class AIClient:
             return files
         except Exception:
             title = assignment.get("title", "assignment").replace(" ", "_").lower()
-            return [{"filename": f"{title}.txt", "content": completed_text}]
+            return [{"filename": f"{title}.txt", "content": raw}]

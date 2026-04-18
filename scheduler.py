@@ -26,6 +26,22 @@ def create_scheduler(app_context: dict) -> AsyncIOScheduler:
         kwargs={"ctx": app_context},
     )
 
+    scheduler.add_job(
+        _sync_submission_states,
+        "interval",
+        minutes=15,
+        id="sync_submissions",
+        kwargs={"ctx": app_context},
+    )
+
+    scheduler.add_job(
+        _verify_drive_links,
+        "interval",
+        minutes=30,
+        id="verify_drive_links",
+        kwargs={"ctx": app_context},
+    )
+
     return scheduler
 
 
@@ -88,5 +104,57 @@ async def _due_date_reminders(ctx: dict):
         error_fn = ctx.get("notify_error")
         if error_fn:
             await error_fn(f"Reminder job error: {e}")
+    finally:
+        session.close()
+
+
+async def _sync_submission_states(ctx: dict):
+    """Check Classroom for submitted assignments and mark them completed."""
+    from db import get_session, get_pending_assignments, update_assignment_status
+
+    classroom = ctx["classroom"]
+    session = get_session()
+    try:
+        pending = get_pending_assignments(session)
+        for a in pending:
+            try:
+                state = classroom._get_submission_state(a.course_id, a.id)
+                if state in ("TURNED_IN", "RETURNED"):
+                    update_assignment_status(session, a.id, "completed")
+                    logger.info(f"Marked '{a.title}' as completed (submitted on Classroom)")
+            except Exception:
+                continue
+    except Exception as e:
+        logger.error(f"sync_submission_states error: {e}")
+    finally:
+        session.close()
+
+
+async def _verify_drive_links(ctx: dict):
+    """Clear Drive links for folders that no longer exist."""
+    from db import get_session, Assignment
+    from drive import DriveClient
+
+    drive = DriveClient()
+    session = get_session()
+    try:
+        assignments = (
+            session.query(Assignment)
+            .filter(Assignment.drive_folder_url.isnot(None))
+            .all()
+        )
+        for a in assignments:
+            try:
+                if not drive.folder_url_valid(a.drive_folder_url):
+                    a.drive_folder_url = None
+                    # Also clear associated file records
+                    for f in a.files:
+                        session.delete(f)
+                    session.commit()
+                    logger.info(f"Cleared deleted Drive link for '{a.title}'")
+            except Exception:
+                continue
+    except Exception as e:
+        logger.error(f"verify_drive_links error: {e}")
     finally:
         session.close()

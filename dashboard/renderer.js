@@ -78,6 +78,7 @@ async function loadPending() {
         <div class="upcoming-course">${esc(a.course_name || '—')}</div>
       </div>
       <div class="upcoming-right">
+        ${a.drive_folder_url ? `<a onclick="window.api.openUrl('${a.drive_folder_url}')" class="days-pill" style="background:#E3F2FD;color:#1565C0;cursor:pointer;text-decoration:none;">Drive &#8599;</a>` : ''}
         ${daysPill(a.due_date)}
         <div class="muted-text" style="margin-top:4px;font-size:0.75rem;">${fmtDate(a.due_date)}</div>
       </div>

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from io import BytesIO
 
 from dotenv import load_dotenv
 from telegram import (
@@ -50,10 +51,9 @@ ai_client = AIClient()
 classroom_client = ClassroomClient()
 drive_client = DriveClient()
 
-# Maps callback keys to assignment IDs for inline button resolution
-pending_actions: dict[str, str] = {}
-# Holds a numbered list of assignments shown to the user
-pending_list: list[dict] = []
+# Tracks user state: when a user selects an assignment, we store it here
+# and wait for their custom prompt before completing it
+awaiting_prompt: dict[int, dict] = {}
 
 
 def _is_allowed(update: Update) -> bool:
@@ -74,7 +74,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🦞 *MimiClaw* is online!\n\n"
         "I monitor your Google Classroom, complete assignments with AI, and save them to Drive.\n\n"
         "Commands:\n"
-        "/assignments — list pending assignments\n"
+        "/assignments — list pending assignments (tap to do one)\n"
         "/check — poll Classroom now\n"
         "/done <id> — mark assignment done manually\n"
         "/remind <text> — save a reminder\n"
@@ -101,9 +101,23 @@ async def cmd_assignments(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("No pending assignments. 🎉")
             return
         lines = ["📚 *Pending Assignments:*\n"]
+        buttons = []
         for i, a in enumerate(items, 1):
-            lines.append(f"{i}. *{a.title}*\n   {a.course_name} — Due: {_format_date(a.due_date)}\n   Status: {a.status}")
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            lines.append(
+                f"{i}. *{a.title}*\n"
+                f"   {a.course_name} — Due: {_format_date(a.due_date)}"
+            )
+            buttons.append(
+                [InlineKeyboardButton(
+                    f"📝 {i}. {a.title[:40]}",
+                    callback_data=f"select:{a.id}",
+                )]
+            )
+        lines.append("\n👆 Tap an assignment above to start working on it.")
+        keyboard = InlineKeyboardMarkup(buttons)
+        await update.message.reply_text(
+            "\n".join(lines), parse_mode="Markdown", reply_markup=keyboard
+        )
     finally:
         session.close()
 
@@ -209,13 +223,20 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_allowed(update):
         return
     text = update.message.text.strip()
+    uid = update.effective_user.id
 
-    # Check if user is selecting from a numbered list
-    if text.isdigit() and pending_list:
-        idx = int(text) - 1
-        if 0 <= idx < len(pending_list):
-            await _notify_single_assignment(pending_list[idx], update.effective_chat.id, ctx.bot)
-            return
+    # If we're waiting for a custom prompt for an assignment
+    if uid in awaiting_prompt:
+        assignment_info = awaiting_prompt.pop(uid)
+        custom_prompt = None if text.lower() in ("none", "no", "nope", "skip", "-") else text
+        await _do_assignment(
+            assignment_info["id"],
+            update.effective_chat.id,
+            ctx.bot,
+            custom_prompt=custom_prompt,
+            pdf_text=assignment_info.get("pdf_text"),
+        )
+        return
 
     # General chat
     session = get_session()
@@ -238,9 +259,12 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     data = query.data
 
-    if data.startswith("do_assignment:"):
+    if data.startswith("select:"):
         assignment_id = data.split(":", 1)[1]
-        await _do_assignment(assignment_id, query.message.chat_id, ctx.bot, query)
+        await _preview_assignment(assignment_id, query, ctx.bot)
+    elif data.startswith("do_assignment:"):
+        assignment_id = data.split(":", 1)[1]
+        await _do_assignment(assignment_id, query.message.chat_id, ctx.bot, query=query)
     elif data.startswith("skip_assignment:"):
         assignment_id = data.split(":", 1)[1]
         session = get_session()
@@ -251,7 +275,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⏭️ Skipped. I'll stop pinging you about this one.")
     elif data.startswith("remind_do:"):
         assignment_id = data.split(":", 1)[1]
-        await _do_assignment(assignment_id, query.message.chat_id, ctx.bot, query)
+        await _preview_assignment(assignment_id, query, ctx.bot)
     elif data.startswith("remind_skip:"):
         assignment_id = data.split(":", 1)[1]
         session = get_session()
@@ -262,7 +286,105 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⏭️ Skipped.")
 
 
-async def _do_assignment(assignment_id: str, chat_id: int, bot: Bot, query=None):
+async def _preview_assignment(assignment_id: str, query, bot: Bot):
+    """Show assignment details, send attachments, and ask for custom prompt."""
+    chat_id = query.message.chat_id
+    uid = query.from_user.id
+    session = get_session()
+    try:
+        a = get_assignment(session, assignment_id)
+        if not a:
+            await query.edit_message_text("Assignment not found.")
+            return
+
+        desc = a.description or "No description provided."
+        due = _format_date(a.due_date)
+        msg = (
+            f"📚 *{a.title}*\n"
+            f"📖 {a.course_name}\n"
+            f"📅 Due: {due}\n\n"
+            f"*Description:*\n{desc}"
+        )
+        await query.edit_message_text(msg, parse_mode="Markdown")
+
+        # Fetch attachments from Classroom and send them
+        pdf_text = None
+        try:
+            assignments = classroom_client.get_assignments(a.course_id, a.course_name)
+            classroom_data = next((x for x in assignments if x["id"] == a.id), None)
+            if classroom_data:
+                for att in classroom_data.get("attachments", []):
+                    if att["type"] == "drive_file" and att.get("id"):
+                        try:
+                            file_bytes = drive_client.download_file(att["id"])
+                            filename = att.get("title", "attachment")
+                            doc_buf = BytesIO(file_bytes)
+                            doc_buf.name = filename
+                            await bot.send_document(
+                                chat_id=chat_id,
+                                document=doc_buf,
+                                filename=filename,
+                                caption=f"📎 Attachment: {filename}",
+                            )
+                            # Try to extract text from PDF for AI context
+                            if filename.lower().endswith(".pdf"):
+                                try:
+                                    import tempfile, fitz
+                                    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                                        tmp.write(file_bytes)
+                                        tmp_path = tmp.name
+                                    doc = fitz.open(tmp_path)
+                                    pages = [page.get_text() for page in doc]
+                                    doc.close()
+                                    os.remove(tmp_path)
+                                    extracted = "\n".join(pages).strip()
+                                    if extracted:
+                                        pdf_text = (pdf_text or "") + "\n\n" + extracted
+                                except Exception as e:
+                                    logger.warning(f"PDF text extraction failed: {e}")
+                        except Exception as e:
+                            logger.warning(f"Failed to send attachment {att.get('title')}: {e}")
+                            await bot.send_message(
+                                chat_id=chat_id,
+                                text=f"⚠️ Couldn't download attachment: {att.get('title', 'unknown')}",
+                            )
+                    elif att["type"] == "link":
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=f"🔗 Link: [{att.get('title', 'Link')}]({att['url']})",
+                            parse_mode="Markdown",
+                            disable_web_page_preview=True,
+                        )
+        except Exception as e:
+            logger.warning(f"Failed to fetch attachments from Classroom: {e}")
+
+        # Store state and ask for custom prompt
+        awaiting_prompt[uid] = {
+            "id": a.id,
+            "pdf_text": pdf_text,
+        }
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                "✏️ Do you have any specific instructions I should follow for this assignment?\n\n"
+                "For example: _write it in a human tone, keep it under 500 words, "
+                "focus on section 3, use APA format_, etc.\n\n"
+                'Type your instructions, or send *none* to proceed without any.'
+            ),
+            parse_mode="Markdown",
+        )
+    finally:
+        session.close()
+
+
+async def _do_assignment(
+    assignment_id: str,
+    chat_id: int,
+    bot: Bot,
+    query=None,
+    custom_prompt: str | None = None,
+    pdf_text: str | None = None,
+):
     session = get_session()
     try:
         a = get_assignment(session, assignment_id)
@@ -274,10 +396,7 @@ async def _do_assignment(assignment_id: str, chat_id: int, bot: Bot, query=None)
     finally:
         session.close()
 
-    if query:
-        await query.edit_message_text("🤖 Working on it...")
-    else:
-        await bot.send_message(chat_id=chat_id, text="🤖 Working on it...")
+    await bot.send_message(chat_id=chat_id, text="🤖 Working on it... This may take a minute.")
 
     session = get_session()
     try:
@@ -291,33 +410,49 @@ async def _do_assignment(assignment_id: str, chat_id: int, bot: Bot, query=None)
             "due_date": a.due_date,
         }
 
-        completed_text = ai_client.complete_assignment(assignment_dict)
-        files = ai_client.split_into_files(assignment_dict, completed_text)
+        if custom_prompt:
+            assignment_dict["description"] = (
+                (assignment_dict["description"] or "") +
+                f"\n\n--- Student's Instructions ---\n{custom_prompt}"
+            )
 
-        folder_url = drive_client.create_assignment_folder(
-            a.course_name, a.title
-        )
+        # AI now returns files directly with correct names and extensions
+        files = ai_client.complete_assignment(assignment_dict, pdf_text=pdf_text)
+
+        # Upload to Drive
+        folder_url = drive_client.create_assignment_folder(a.course_name, a.title)
         folder_id = drive_client.get_folder_id_for_assignment(a.course_name, a.title)
         uploaded = drive_client.upload_multiple_files(files, folder_id)
 
         for uf in uploaded:
             add_completed_file(session, a.id, uf["filename"], uf["url"])
 
-        update_assignment_status(session, a.id, "completed", drive_folder_url=folder_url)
+        update_assignment_status(session, a.id, "pending", drive_folder_url=folder_url)
 
-        if len(uploaded) == 1:
-            preview = completed_text[:300]
-            msg = (
-                f"✅ Done! Saved to Drive: [Open]({uploaded[0]['url']})\n\n"
-                f"*Preview:*\n{preview}..."
+        # Send each file as a document in Telegram
+        for f in files:
+            doc_buf = BytesIO(f["content"].encode("utf-8"))
+            doc_buf.name = f["filename"]
+            await bot.send_document(
+                chat_id=chat_id,
+                document=doc_buf,
+                filename=f["filename"],
+                caption=f"📄 {f['filename']}",
             )
+
+        # Send Drive link
+        if len(uploaded) == 1:
+            msg = f"✅ Done! Saved to Drive: [Open]({uploaded[0]['url']})"
         else:
             filenames = ", ".join(f["filename"] for f in uploaded)
             msg = (
-                f"✅ Done! {len(uploaded)} files saved to Drive folder: [Open Folder]({folder_url})\n"
+                f"✅ Done! {len(uploaded)} files saved to Drive folder: "
+                f"[Open Folder]({folder_url})\n"
                 f"Files: {filenames}"
             )
-        await bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown", disable_web_page_preview=True)
+        await bot.send_message(
+            chat_id=chat_id, text=msg, parse_mode="Markdown", disable_web_page_preview=True
+        )
     except Exception as e:
         update_assignment_status(session, assignment_id, "pending")
         await bot.send_message(chat_id=chat_id, text=f"Error completing assignment: {e}")
@@ -326,53 +461,41 @@ async def _do_assignment(assignment_id: str, chat_id: int, bot: Bot, query=None)
 
 
 async def _notify_new_assignments(assignments: list[dict], chat_id: int, bot: Bot):
-    global pending_list
     if len(assignments) == 1:
-        await _notify_single_assignment(assignments[0], chat_id, bot)
+        a = assignments[0]
+        due = _format_date(a.get("due_date"))
+        desc = a.get("description", "") or "No description."
+        msg = (
+            f"📚 New assignment in *{a['course_name']}*:\n\n"
+            f"*{a['title']}*\n"
+            f"📅 Due: {due}\n\n"
+            f"{desc}"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Do it", callback_data=f"select:{a['id']}"),
+                InlineKeyboardButton("⏭️ Skip", callback_data=f"skip_assignment:{a['id']}"),
+            ]
+        ])
+        await bot.send_message(
+            chat_id=chat_id, text=msg, reply_markup=keyboard, parse_mode="Markdown"
+        )
     else:
-        pending_list = assignments
         lines = [f"📚 *{len(assignments)} new assignments found:*\n"]
+        buttons = []
         for i, a in enumerate(assignments, 1):
             due = _format_date(a.get("due_date"))
             lines.append(f"{i}. *{a['title']}* — {a['course_name']} (due {due})")
-        lines.append("\nReply with a number to view and action that assignment, or /assignments to see all.")
-        await bot.send_message(chat_id=chat_id, text="\n".join(lines), parse_mode="Markdown")
-
-
-async def _notify_single_assignment(assignment: dict, chat_id: int, bot: Bot):
-    # Download and send any PDF attachments
-    for att in assignment.get("attachments", []):
-        if att["type"] == "drive_file" and att.get("id"):
-            try:
-                data = drive_client.download_file(att["id"])
-                filename = att.get("title", "attachment") + ".pdf"
-                from io import BytesIO
-                await bot.send_document(
-                    chat_id=chat_id,
-                    document=BytesIO(data),
-                    filename=filename,
-                )
-            except Exception:
-                pass
-
-    due = _format_date(assignment.get("due_date"))
-    desc = assignment.get("description", "") or "No description."
-    msg = (
-        f"📚 New assignment in *{assignment['course_name']}*:\n\n"
-        f"*{assignment['title']}*\n"
-        f"📅 Due: {due}\n\n"
-        f"{desc}\n\n"
-        "Should I complete this assignment and save it to Drive?"
-    )
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Yes, do it", callback_data=f"do_assignment:{assignment['id']}"),
-            InlineKeyboardButton("⏭️ Skip", callback_data=f"skip_assignment:{assignment['id']}"),
-        ]
-    ])
-    await bot.send_message(
-        chat_id=chat_id, text=msg, reply_markup=keyboard, parse_mode="Markdown"
-    )
+            buttons.append(
+                [InlineKeyboardButton(
+                    f"📝 {i}. {a['title'][:40]}",
+                    callback_data=f"select:{a['id']}",
+                )]
+            )
+        keyboard = InlineKeyboardMarkup(buttons)
+        await bot.send_message(
+            chat_id=chat_id, text="\n".join(lines), parse_mode="Markdown", reply_markup=keyboard
+        )
 
 
 async def _notify_due_date(assignment, bot: Bot, chat_id: int):

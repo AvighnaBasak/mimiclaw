@@ -9,7 +9,10 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+SCOPES = [
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CREDS_FILE = os.path.join(BASE_DIR, "credentials", "google_credentials.json")
 TOKEN_FILE = os.path.join(BASE_DIR, "credentials", "token_drive.json")
@@ -104,6 +107,23 @@ class DriveClient:
             except Exception as e:
                 results.append({"filename": f["filename"], "url": f"Error: {e}"})
         return results
+
+    def file_exists(self, file_id: str) -> bool:
+        svc = self._get_service()
+        try:
+            svc.files().get(fileId=file_id, fields="id").execute()
+            return True
+        except Exception:
+            return False
+
+    def folder_url_valid(self, folder_url: str) -> bool:
+        if not folder_url:
+            return False
+        import re
+        match = re.search(r'/folders/([a-zA-Z0-9_-]+)', folder_url)
+        if not match:
+            return False
+        return self.file_exists(match.group(1))
 
     def download_file(self, file_id: str) -> bytes:
         svc = self._get_service()
