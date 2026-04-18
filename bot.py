@@ -396,8 +396,6 @@ async def _do_assignment(
     finally:
         session.close()
 
-    await bot.send_message(chat_id=chat_id, text="🤖 Working on it... This may take a minute.")
-
     session = get_session()
     try:
         a = get_assignment(session, assignment_id)
@@ -416,44 +414,83 @@ async def _do_assignment(
                 f"\n\n--- Student's Instructions ---\n{custom_prompt}"
             )
 
-        # AI now returns files directly with correct names and extensions
-        files = ai_client.complete_assignment(assignment_dict, pdf_text=pdf_text)
+        # Step 1: Plan what files are needed
+        await bot.send_message(chat_id=chat_id, text="🤖 Analyzing assignment...")
+        filenames = ai_client.plan_files(assignment_dict, pdf_text=pdf_text)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"📋 Will generate {len(filenames)} file(s): {', '.join(filenames)}",
+        )
 
-        # Upload to Drive
+        # Step 2: Create Drive folder
         folder_url = drive_client.create_assignment_folder(a.course_name, a.title)
         folder_id = drive_client.get_folder_id_for_assignment(a.course_name, a.title)
-        uploaded = drive_client.upload_multiple_files(files, folder_id)
 
-        for uf in uploaded:
-            add_completed_file(session, a.id, uf["filename"], uf["url"])
+        # Step 3: Generate each file one by one, upload and send immediately
+        uploaded = []
+        for i, filename in enumerate(filenames, 1):
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"⚙️ Generating file {i}/{len(filenames)}: {filename}...",
+            )
 
-        update_assignment_status(session, a.id, "pending", drive_folder_url=folder_url)
+            try:
+                content = ai_client.generate_file(filename, assignment_dict, pdf_text=pdf_text)
+            except Exception as e:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ Failed to generate {filename}: {e}",
+                )
+                continue
 
-        # Send each file as a document in Telegram
-        for f in files:
-            doc_buf = BytesIO(f["content"].encode("utf-8"))
-            doc_buf.name = f["filename"]
+            # Upload to Drive
+            try:
+                result = drive_client.upload_text_as_doc(filename, content, folder_id)
+                file_url = result.get("webViewLink", "")
+                uploaded.append({"filename": filename, "url": file_url})
+                add_completed_file(session, a.id, filename, file_url)
+            except Exception as e:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ Failed to upload {filename} to Drive: {e}",
+                )
+
+            # Send file in Telegram immediately
+            doc_buf = BytesIO(content.encode("utf-8"))
+            doc_buf.name = filename
             await bot.send_document(
                 chat_id=chat_id,
                 document=doc_buf,
-                filename=f["filename"],
-                caption=f"📄 {f['filename']}",
+                filename=filename,
+                caption=f"📄 {filename} ({i}/{len(filenames)})",
             )
 
-        # Send Drive link
-        if len(uploaded) == 1:
-            msg = f"✅ Done! Saved to Drive: [Open]({uploaded[0]['url']})"
-        else:
-            filenames = ", ".join(f["filename"] for f in uploaded)
-            msg = (
-                f"✅ Done! {len(uploaded)} files saved to Drive folder: "
-                f"[Open Folder]({folder_url})\n"
-                f"Files: {filenames}"
+        # Step 4: Update status and send Drive link
+        update_assignment_status(session, a.id, "pending", drive_folder_url=folder_url)
+
+        if not uploaded:
+            await bot.send_message(chat_id=chat_id, text="❌ No files were generated successfully.")
+        elif len(uploaded) == 1:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ Done! Saved to Drive: [Open]({uploaded[0]['url']})",
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
             )
-        await bot.send_message(
-            chat_id=chat_id, text=msg, parse_mode="Markdown", disable_web_page_preview=True
-        )
+        else:
+            filenames_str = ", ".join(f["filename"] for f in uploaded)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"✅ Done! {len(uploaded)} files saved to Drive folder: "
+                    f"[Open Folder]({folder_url})\n"
+                    f"Files: {filenames_str}"
+                ),
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
     except Exception as e:
+        logger.error(f"Assignment error: {e}", exc_info=True)
         update_assignment_status(session, assignment_id, "pending")
         await bot.send_message(chat_id=chat_id, text=f"Error completing assignment: {e}")
     finally:

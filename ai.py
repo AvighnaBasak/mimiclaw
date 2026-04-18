@@ -1,9 +1,12 @@
 import json
+import logging
 import os
+import re
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
@@ -27,19 +30,28 @@ MODELS = [
 ]
 
 
-import re
-
-
 def _strip_thinking(text: str) -> str:
     text = re.sub(r'<thought>.*?</thought>', '', text, flags=re.DOTALL)
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     return text.strip()
 
 
+def _strip_code_fences(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        first_newline = cleaned.find("\n")
+        cleaned = cleaned[first_newline + 1:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    return cleaned.strip()
+
+
 class AIClient:
     def _call(self, messages: list, max_tokens: int = 2048) -> str:
+        errors = []
         for model in MODELS:
             try:
+                logger.info(f"Trying model: {model['name']}")
                 payload = {
                     "model": model["name"],
                     "messages": messages,
@@ -50,16 +62,22 @@ class AIClient:
                     "Content-Type": "application/json",
                 }
                 resp = requests.post(
-                    model["url"], headers=headers, json=payload, timeout=180
+                    model["url"], headers=headers, json=payload, timeout=120
                 )
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
                 if content and content.strip():
+                    logger.info(f"Success with {model['name']} ({len(content)} chars)")
                     return _strip_thinking(content)
-            except Exception:
-                continue
-        raise RuntimeError("All AI models failed to respond.")
+                errors.append(f"{model['name']}: empty response")
+            except requests.exceptions.Timeout:
+                errors.append(f"{model['name']}: timeout")
+                logger.warning(f"Timeout with {model['name']}")
+            except Exception as e:
+                errors.append(f"{model['name']}: {e}")
+                logger.warning(f"Error with {model['name']}: {e}")
+        raise RuntimeError(f"All AI models failed: {'; '.join(errors)}")
 
     def chat(self, user_message: str, history: list) -> str:
         messages = [
@@ -77,66 +95,76 @@ class AIClient:
         messages.append({"role": "user", "content": user_message})
         return self._call(messages, max_tokens=1024)
 
-    def complete_assignment(self, assignment: dict, pdf_text: str | None = None) -> list[dict]:
-        context_parts = [
+    def _build_context(self, assignment: dict, pdf_text: str | None = None) -> str:
+        parts = [
             f"Course: {assignment.get('course_name', 'Unknown')}",
             f"Assignment Title: {assignment.get('title', 'Untitled')}",
             f"Assignment Description:\n{assignment.get('description', 'No description provided.')}",
         ]
         if pdf_text:
-            context_parts.append(f"\nAttached PDF/Document Content:\n{pdf_text}")
+            parts.append(f"\nAttached PDF/Document Content:\n{pdf_text}")
+        return "\n\n".join(parts)
 
-        prompt = "\n\n".join(context_parts)
+    def _parse_json(self, raw: str) -> dict | None:
+        cleaned = _strip_code_fences(raw)
+        start = cleaned.find("{")
+        end = cleaned.rfind("}") + 1
+        if start == -1 or end == 0:
+            return None
+        try:
+            return json.loads(cleaned[start:end])
+        except Exception:
+            return None
 
+    def plan_files(self, assignment: dict, pdf_text: str | None = None) -> list[str]:
+        context = self._build_context(assignment, pdf_text)
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "You are an expert academic assistant that produces assignment deliverables.\n\n"
+                    "You are an expert academic assistant. Analyze the assignment and determine "
+                    "what files need to be created.\n\n"
                     "RULES:\n"
-                    "1. Read the assignment carefully and determine what files are required.\n"
-                    "2. Use the CORRECT file extension based on what the assignment asks for "
-                    "(.c, .py, .java, .cpp, .h, .txt, .md, etc.).\n"
-                    "3. If the assignment requires multiple files (e.g. client.c and server.c), "
-                    "create each as a SEPARATE file.\n"
-                    "4. For code assignments: output ONLY the source code. No introductions, "
-                    "no design overviews, no architecture explanations, no fluff. "
-                    "Just clean, compilable/runnable code with necessary comments.\n"
-                    "5. For written assignments: output ONLY the essay/report content.\n"
-                    "6. Return your response as ONLY valid JSON in this exact format:\n"
-                    '{"files": [{"filename": "exact_name.ext", "content": "full file content here"}]}\n'
-                    "7. No text before or after the JSON. No markdown code fences. Just the JSON object.\n"
-                    "8. Make sure the code is COMPLETE and not truncated. Every function must have "
-                    "a full implementation."
+                    "1. Use the CORRECT file extension (.c, .py, .java, .cpp, .h, .txt, .md, etc.)\n"
+                    "2. If the assignment requires multiple files (e.g. client.c and server.c), "
+                    "list each separately.\n"
+                    "3. Use descriptive filenames matching what the assignment asks for.\n"
+                    "4. Return ONLY valid JSON: {\"files\": [\"filename1.ext\", \"filename2.ext\"]}\n"
+                    "5. No text before or after the JSON."
                 ),
             },
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": context},
         ]
+        raw = self._call(messages, max_tokens=256)
+        parsed = self._parse_json(raw)
+        if parsed and isinstance(parsed.get("files"), list) and parsed["files"]:
+            filenames = [f for f in parsed["files"] if isinstance(f, str)]
+            if filenames:
+                logger.info(f"Planned {len(filenames)} files: {filenames}")
+                return filenames
+        title = assignment.get("title", "assignment").replace(" ", "_").lower()
+        return [f"{title}.txt"]
 
-        raw = self._call(messages, max_tokens=16384)
-
-        # Strip markdown code fences if present
-        cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            first_newline = cleaned.find("\n")
-            cleaned = cleaned[first_newline + 1:]
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]
-        cleaned = cleaned.strip()
-
-        try:
-            start = cleaned.find("{")
-            end = cleaned.rfind("}") + 1
-            if start == -1 or end == 0:
-                raise ValueError("No JSON found")
-            parsed = json.loads(cleaned[start:end])
-            files = parsed.get("files", [])
-            if not files:
-                raise ValueError("Empty files list")
-            for f in files:
-                if not isinstance(f.get("filename"), str) or not isinstance(f.get("content"), str):
-                    raise ValueError("Malformed file entry")
-            return files
-        except Exception:
-            title = assignment.get("title", "assignment").replace(" ", "_").lower()
-            return [{"filename": f"{title}.txt", "content": raw}]
+    def generate_file(self, filename: str, assignment: dict, pdf_text: str | None = None) -> str:
+        context = self._build_context(assignment, pdf_text)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert academic assistant. You must produce the COMPLETE content "
+                    f"for a file named: {filename}\n\n"
+                    "RULES:\n"
+                    "1. Output ONLY the file content. No explanations, no introductions, "
+                    "no design overviews, no markdown fences, no fluff.\n"
+                    "2. For code files: output clean, compilable/runnable source code with "
+                    "necessary inline comments only.\n"
+                    "3. For written files: output only the essay/report text.\n"
+                    "4. The code must be COMPLETE — every function fully implemented, "
+                    "nothing truncated or left as TODO.\n"
+                    "5. Start directly with the code/content. No preamble."
+                ),
+            },
+            {"role": "user", "content": f"{context}\n\nProduce the complete content for: {filename}"},
+        ]
+        raw = self._call(messages, max_tokens=8192)
+        return _strip_code_fences(raw)
